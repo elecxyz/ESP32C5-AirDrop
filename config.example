@@ -1,0 +1,8 @@
+# Local configuration: ~/.config/esp32c5-airdrop/config
+# Use the ISO country code for the radio's physical location. No Wi-Fi
+# password or SSID is needed: the C5 never joins your normal network.
+REG="00"
+
+# Channel 6 is the conservative default. Channel 149 was used for the measured
+# 5 GHz photo transfer; use it only with the correct country code where allowed.
+C5_CHANNEL="6"

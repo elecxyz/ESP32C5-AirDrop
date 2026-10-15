@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Tidy a successfully extracted AirDrop payload, then notify the KDE session.
+set -euo pipefail
+
+recv_dir=${1:-}
+[ -d "$recv_dir" ] || exit 2
+
+mapfile -d '' extracted || true
+tidy=${CACHYDROP_TIDY:-}
+
+declare -a received=()
+if [ -x "$tidy" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      "tidied: "*) received+=("${line#tidied: }") ;;
+    esac
+  done < <(AIRDROP_TIDY_SETTLE=0 "$tidy" "$recv_dir" 2>/dev/null || true)
+fi
+
+# Files extracted directly into Downloads do not pass through a staging
+# directory, so a tidy operation has nothing to report for them.
+for path in "${extracted[@]}"; do
+  case "${path##*/}" in ._*|.DS_Store) continue ;; esac
+  [ -e "$path" ] || continue
+  received+=("$path")
+done
+
+# Preserve order while dropping duplicate paths and children of an item that
+# was already reported as a top-level received directory.
+declare -A seen=()
+declare -a unique=()
+for path in "${received[@]}"; do
+  [ -e "$path" ] || continue
+  path=$(realpath -m -- "$path")
+  [[ "$path" == "$recv_dir"/* ]] || continue
+  [ -z "${seen[$path]:-}" ] || continue
+  seen[$path]=1
+  unique+=("$path")
+done
+[ "${#unique[@]}" -gt 0 ] || exit 0
+
+uid=$(id -u)
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$uid}
+export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
+
+if [ "${#unique[@]}" -eq 1 ]; then
+  target=${unique[0]}
+  body="$(basename -- "$target") saved to Downloads"
+else
+  target=$recv_dir
+  body="${#unique[@]} items saved to Downloads"
+fi
+
+action=$(notify-send \
+  --app-name="ESP32C5 AirDrop" \
+  --icon=folder-download \
+  --urgency=normal \
+  --action=show="Show in Folder" \
+  "AirDrop complete" "$body" 2>/dev/null || true)
+
+if [ "$action" = show ]; then
+  if [ -d "$target" ]; then
+    dolphin "$target" >/dev/null 2>&1 &
+  else
+    dolphin --select "$target" >/dev/null 2>&1 &
+  fi
+fi

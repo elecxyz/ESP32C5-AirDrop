@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Unprivileged controller and JSON status interface for the C5 Plasma widget."""
+# SPDX-License-Identifier: GPL-3.0-only
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.append("/usr/local/libexec/esp32c5-airdrop")
+import c5_device
+
+STATE_DIR = Path("/run/esp32c5-airdrop")
+UNIT_RE = re.compile(r"esp32c5-airdrop@ttyACM[0-9]+\.service\Z", re.ASCII)
+STATES = {"starting", "receiving", "stopping", "ready", "error", "absent"}
+
+
+def unit_for(interface: str) -> str:
+    if not c5_device.valid_interface(interface):
+        raise ValueError("invalid C5 interface")
+    return f"esp32c5-airdrop@{interface}.service"
+
+
+def unit_state(unit: str) -> str:
+    if not UNIT_RE.fullmatch(unit):
+        raise ValueError("invalid C5 unit")
+    try:
+        result = subprocess.run(["systemctl", "show", "--property=ActiveState", "--value", unit],
+                                capture_output=True, text=True, check=False, timeout=3)
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
+def read_state(interface: str) -> dict:
+    if not c5_device.valid_interface(interface):
+        return {}
+    try:
+        data = json.loads((STATE_DIR / f"{interface}.json").read_text())
+        if isinstance(data, dict) and data.get("interface") == interface:
+            return data
+    except (OSError, UnicodeError, ValueError):
+        pass
+    return {}
+
+
+def payload(state: str, interface: str | None, detail: str, expires: int = 0) -> dict:
+    return {"state": state, "interface": interface, "backend": "esp32c5", "device": c5_device.DEVICE_LABEL,
+            "expires_at": expires, "remaining": max(0, expires - int(time.time())) if expires else 0,
+            "detail": detail}
+
+
+def status() -> dict:
+    devices = c5_device.registered_devices()
+    if not devices:
+        return payload("absent", None, f"Connect the registered {c5_device.DEVICE_LABEL}")
+    # Prefer an active receiver if more than one registered board is connected.
+    states = [(device, unit_state(unit_for(device.interface))) for device in devices]
+    device, service_state = next((pair for pair in states if pair[1] in
+                                 {"active", "activating", "deactivating"}), states[0])
+    interface = device.interface
+    saved = read_state(interface)
+    if service_state == "deactivating":
+        return payload("stopping", interface, "Stopping the C5 AirDrop receiver")
+    if service_state in {"active", "activating"}:
+        state = saved.get("state", "starting")
+        if state not in {"starting", "receiving", "stopping", "error"}:
+            state = "starting"
+        try:
+            expires = max(0, int(saved.get("expires_at", 0))) if state == "receiving" else 0
+        except (TypeError, ValueError, OverflowError):
+            expires = 0
+        if state == "receiving" and expires and expires <= int(time.time()):
+            return payload("stopping", interface, "The ten-minute receive window has ended")
+        return payload(state, interface, str(saved.get("detail", "Preparing C5 AirDrop")), expires)
+    if service_state == "unknown":
+        return payload("error", interface, "Could not read the C5 receiver service status")
+    if saved.get("state") == "error":
+        return payload("error", interface, str(saved.get("detail", "The C5 AirDrop receiver failed")))
+    if service_state == "failed":
+        return payload("error", interface, "The C5 AirDrop receiver failed")
+    return payload("ready", interface, f"{c5_device.DEVICE_LABEL} connected. Click to receive for 10 minutes")
+
+
+def manage(verb: str, interface: str) -> int:
+    if verb not in {"start", "stop"}:
+        raise ValueError("invalid C5 action")
+    unit = unit_for(interface)
+    # Re-check unplug/registration races just before dispatching a start.
+    if verb == "start" and not c5_device.is_registered(interface):
+        return 3
+    return subprocess.run(["systemctl", verb, "--no-block", unit], check=False).returncode
+
+
+def main(argv=None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) > 1 or args and args[0] not in {"status", "--json", "start", "stop", "toggle"}:
+        print("usage: esp32c5-airdrop-control {status|start|stop|toggle}", file=sys.stderr)
+        return 2
+    command = args[0] if args else "status"
+    current = status()
+    interface = current["interface"]
+    if command in {"status", "--json"}:
+        print(json.dumps(current, separators=(",", ":")))
+        return 0
+    if interface is None:
+        return 0 if command == "stop" else 3
+    if command == "toggle":
+        command = "stop" if current["state"] in {"starting", "receiving", "stopping"} else "start"
+    return manage(command, interface)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

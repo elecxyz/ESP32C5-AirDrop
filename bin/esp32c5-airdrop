@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-only
+set -euo pipefail
+SCRIPT=$(readlink -f "${BASH_SOURCE[0]}")
+ROOT=$(cd "$(dirname "$SCRIPT")/.." && pwd)
+command=${1:-status}
+case "$command" in
+  start|stop|toggle|status)
+    control=/usr/local/bin/esp32c5-airdrop-control
+    [[ -x $control ]] || control="$ROOT/desktop/esp32c5-airdrop-control"
+    exec "$control" "$command" "${@:2}"
+    ;;
+  setup) exec "$ROOT/scripts/setup.sh" ;;
+  doctor)
+    printf 'ESP32C5 AirDrop — continuation of CachyDrop\n'
+    printf 'C5 host: %s\n' "$([[ -x $ROOT/c5/host/build/cachydrop-c5 ]] && echo built || echo missing)"
+    printf 'OpenDrop: %s\n' "$([[ -x $ROOT/.venv-opendrop/bin/python ]] && echo installed || echo missing)"
+    printf 'Registered device status: '
+    exec python3 "$ROOT/desktop/esp32c5-airdrop-control" status
+    ;;
+  help|-h|--help)
+    printf 'Usage: esp32c5-airdrop {start|stop|toggle|status [--json]|doctor|setup}\n'
+    printf 'Plugging in a registered C5 starts a ten-minute receive window.\n'
+    ;;
+  *) printf 'Unknown command: %s\n' "$command" >&2; exit 2 ;;
+esac

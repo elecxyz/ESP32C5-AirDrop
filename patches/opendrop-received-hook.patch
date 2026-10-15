@@ -1,0 +1,53 @@
+--- a/opendrop/server.py
++++ b/opendrop/server.py
+@@ -24,6 +24,7 @@
+ import plistlib
+ import socket
+ import struct
++import subprocess
+ import threading
+ import time
+ import zlib
+@@ -539,6 +540,12 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
+                 if not buf:
+                     break
+                 raw.write(buf)
++
++        before_extract = {
++            os.path.realpath(os.path.join(root, name))
++            for root, _, names in os.walk(os.getcwd())
++            for name in names
++        }
+ 
+         try:
+             if raw_path.endswith(".dvzip"):
+@@ -560,6 +567,29 @@ class AirDropServerHandler(BaseHTTPRequestHandler):
+         else:
+             logger.info(f"Extracted into {os.getcwd()}")
+             os.remove(raw_path)
++            received = sorted(
++                {
++                    os.path.realpath(os.path.join(root, name))
++                    for root, _, names in os.walk(os.getcwd())
++                    for name in names
++                }
++                - before_extract
++            )
++            hook = os.environ.get("AIRDROP_RECEIVED")
++            if hook and received:
++                try:
++                    process = subprocess.Popen(
++                        [hook, os.getcwd()],
++                        stdin=subprocess.PIPE,
++                        stdout=subprocess.DEVNULL,
++                        stderr=subprocess.DEVNULL,
++                    )
++                    process.stdin.write(
++                        b"\0".join(os.fsencode(path) for path in received) + b"\0"
++                    )
++                    process.stdin.close()
++                except OSError as error:
++                    logger.warning(f"Could not run received-file hook ({error}).")
+ 
+         transferred = reader.total / 1024.0 / 1024.0
+         speed = transferred / (time.time() - start)

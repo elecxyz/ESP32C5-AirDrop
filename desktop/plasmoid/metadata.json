@@ -1,0 +1,15 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "KPlugin": {
+    "Authors": [{"Name": "elecxyz"}],
+    "Category": "System Information",
+    "Description": "Receive AirDrop through a registered ESP32-C5 USB device for ten minutes",
+    "EnabledByDefault": true,
+    "Icon": "network-wireless-hotspot",
+    "Id": "org.esp32c5.airdrop",
+    "License": "GPL-3.0-only",
+    "Name": "AirDrop",
+    "Version": "1.0.0"
+  },
+  "X-Plasma-API-Minimum-Version": "6.0"
+}

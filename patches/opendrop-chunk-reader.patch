@@ -1,0 +1,57 @@
+--- a/opendrop/server.py
++++ b/opendrop/server.py
+@@ -422,20 +422,49 @@
+         class HTTPChunkedReader(io.RawIOBase):
+             def __init__(self, rfile, *args, **kwargs):
+                 super().__init__(*args, **kwargs)
+                 self.rfile = rfile
+-                self.chunk = None
++                self.chunk = b""
+                 self.total = 0
++                self.done = False
++
++            def _read_exact(self, length):
++                parts = []
++                remaining = length
++                while remaining:
++                    part = self.rfile.read(remaining)
++                    if not part:
++                        raise EOFError(
++                            f"chunked upload ended with {remaining} bytes missing"
++                        )
++                    parts.append(part)
++                    remaining -= len(part)
++                return b"".join(parts)
+ 
+             def _next_chunk(self):
+-                if self.chunk is None or len(self.chunk) == 0:
+-                    length = int(self.rfile.readline().rstrip(), 16)
+-                    self.chunk = self.rfile.read(length)
+-                    self.rfile.readline()  # strip trailing \n\r
++                if self.done or self.chunk:
++                    return
++                line = self.rfile.readline()
++                if not line:
++                    raise EOFError("chunked upload ended before the final chunk")
++                length = int(line.strip().split(b";", 1)[0], 16)
++                if length == 0:
++                    # Consume optional trailers through the empty line.
++                    while True:
++                        trailer = self.rfile.readline()
++                        if trailer in (b"\r\n", b"\n", b""):
++                            break
++                    self.done = True
++                    return
++                self.chunk = self._read_exact(length)
++                if self._read_exact(2) != b"\r\n":
++                    raise ValueError("invalid CRLF after HTTP chunk")
+ 
+             def readinto(self, buf):
+                 self._next_chunk()
++                if self.done:
++                    return 0
+                 length = min(len(self.chunk), len(buf))
+                 buf[:length] = self.chunk[:length]
+                 self.chunk = self.chunk[length:]
+                 self.total += length
+                 return length

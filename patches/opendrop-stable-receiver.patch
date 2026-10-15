@@ -1,0 +1,93 @@
+--- a/opendrop/config.py
++++ b/opendrop/config.py
+@@ -81,7 +81,31 @@ class AirDropConfig:
+         self.port = server_port
+ 
+         if service_id is None:
+-            service_id = f"{random.randint(0, 0xFFFFFFFFFFFF):012x}"  # random 6-byte string in base16
++            # A receiver is one Bonjour service, not a new device on every
++            # invocation.  A random ID per process leaves stale 75-minute PTR
++            # records on iOS whenever the radio vanishes before a goodbye can
++            # be sent, eventually producing several identities for one host.
++            # Persist the 48-bit identifier alongside the receiver keys.
++            os.makedirs(self.airdrop_dir, exist_ok=True)
++            service_id_file = os.path.join(self.airdrop_dir, "service_id")
++            try:
++                with open(service_id_file, "r", encoding="ascii") as f:
++                    saved_service_id = f.read().strip().lower()
++            except OSError:
++                saved_service_id = ""
++            if len(saved_service_id) == 12 and all(
++                c in "0123456789abcdef" for c in saved_service_id
++            ):
++                service_id = saved_service_id
++            else:
++                service_id = f"{random.randint(0, 0xFFFFFFFFFFFF):012x}"
++                tmp = service_id_file + ".tmp"
++                with open(tmp, "w", encoding="ascii") as f:
++                    f.write(service_id + "\n")
++                    f.flush()
++                    os.fsync(f.fileno())
++                os.chmod(tmp, 0o600)
++                os.replace(tmp, service_id_file)
+         self.service_id = service_id
+ 
+         self.debug = debug
+--- a/opendrop/cli.py
++++ b/opendrop/cli.py
+@@ -20,6 +20,7 @@ import argparse
+ import json
+ import logging
+ import os
++import signal
+ import sys
+ import threading
+ import time
+@@ -37,6 +38,13 @@ def main():
+ 
+ class AirDropCli:
+     def __init__(self, args):
++        # systemd and CachyDrop stop receivers with SIGTERM.  Turn that into
++        # the same orderly unwind as Ctrl+C so zeroconf can retract the mDNS
++        # service before the dedicated radio disappears.
++        signal.signal(
++            signal.SIGTERM,
++            lambda _signum, _frame: (_ for _ in ()).throw(KeyboardInterrupt()),
++        )
+         parser = argparse.ArgumentParser()
+         parser.add_argument("action", choices=["receive", "find", "send"])
+         parser.add_argument("-f", "--file", help="File to be sent")
+@@ -56,6 +64,9 @@ class AirDropCli:
+         parser.add_argument(
+             "-n", "--name", help="Computer name (displayed in sharing pane)"
+         )
++        parser.add_argument(
++            "-H", "--hostname", help="Stable mDNS hostname (without .local)"
++        )
+         parser.add_argument(
+             "-m", "--model", help="Computer model (displayed in sharing pane)"
+         )
+@@ -81,6 +92,7 @@ class AirDropCli:
+         self.config = AirDropConfig(
+             email=args.email,
+             phone=args.phone,
++            host_name=args.hostname,
+             computer_name=args.name,
+             computer_model=args.model,
+             debug=args.debug,
+--- a/opendrop/server.py
++++ b/opendrop/server.py
+@@ -193,8 +193,12 @@ class AirDropServer:
+         self.http_server.serve_forever()
+ 
+     def stop(self):
++        self.stop_repeat_announce()
+         self.zeroconf.unregister_all_services()
+-        self.http_server.shutdown()
++        self.zeroconf.close()
++        # serve_forever has already unwound when this is called.  shutdown()
++        # from that same thread deadlocks by design; close the listener here.
++        self.http_server.server_close()
+ 
+     def get_properties(self):
+         properties = {b"flags": str(self.config.flags).encode("utf-8")}

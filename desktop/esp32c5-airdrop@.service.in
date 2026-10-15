@@ -1,0 +1,26 @@
+[Unit]
+Description=ESP32-C5 ten-minute AirDrop receiver on %I
+BindsTo=dev-%i.device
+After=dev-%i.device
+ConditionPathExists=/dev/%i
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+SupplementaryGroups=uucp
+Environment=HOME=@HOME@
+Environment=XDG_STATE_HOME=@HOME@/.local/state
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus
+Environment=C5_HOME=@HOME@
+Environment=C5_PROJECT=@PROJECT@
+Environment=C5_WINDOW=600
+ExecStart=/usr/local/libexec/esp32c5-airdrop/session %i
+KillMode=control-group
+TimeoutStopSec=20
+SuccessExitStatus=130
+Restart=no
+RuntimeDirectory=esp32c5-airdrop
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes

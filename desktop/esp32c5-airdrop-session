@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Run a registered C5 for one receive window and publish widget status."""
+# SPDX-License-Identifier: GPL-3.0-only
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.append("/usr/local/libexec/esp32c5-airdrop")
+import c5_device
+
+STATE_DIR = Path("/run/esp32c5-airdrop")
+CONFIG_DIR = Path("/etc/esp32c5-airdrop")
+
+
+def write_state(interface: str, state: str, detail: str, expires: int = 0) -> None:
+    if not c5_device.valid_interface(interface):
+        raise ValueError("invalid C5 interface")
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    data = {"state": state, "interface": interface, "backend": "esp32c5", "device": c5_device.DEVICE_LABEL,
+            "expires_at": expires, "remaining": max(0, expires - int(time.time())) if expires else 0,
+            "detail": detail}
+    fd, temporary = tempfile.mkstemp(prefix=f".{interface}.", dir=STATE_DIR)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream, separators=(",", ":"))
+            stream.write("\n")
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, STATE_DIR / f"{interface}.json")
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def configuration() -> tuple[str, str, int]:
+    country = (CONFIG_DIR / "regdomain").read_text().strip().upper()
+    channel = (CONFIG_DIR / "channel").read_text().strip()
+    if not re.fullmatch(r"00|[A-Z]{2}", country, re.ASCII):
+        raise ValueError("invalid regulatory country configuration")
+    if channel not in {"6", "36", "44", "149"}:
+        raise ValueError("invalid channel configuration")
+    window = int(os.environ.get("C5_WINDOW", "600"))
+    if not 10 <= window <= 600:
+        raise ValueError("receive window must be between 10 and 600 seconds")
+    return country, channel, window
+
+
+def final_state(interface: str, returncode: int, cancelled: bool) -> tuple[str, str]:
+    if not c5_device.is_registered(interface):
+        return "absent", f"Connect the registered {c5_device.DEVICE_LABEL}"
+    if not cancelled and returncode != 0:
+        return "error", "C5 AirDrop stopped unexpectedly; check the receiver service log"
+    return "ready", f"{c5_device.DEVICE_LABEL} connected. Click to receive for 10 minutes"
+
+
+def main(argv=None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 1 or not c5_device.valid_interface(args[0]):
+        print("usage: esp32c5-airdrop-session ttyACM<number>", file=sys.stderr)
+        return 2
+    interface = args[0]
+    if not c5_device.is_registered(interface):
+        write_state(interface, "absent", f"Connect the registered {c5_device.DEVICE_LABEL}")
+        return 3
+    write_state(interface, "starting", f"Preparing {c5_device.DEVICE_LABEL}")
+    try:
+        country, channel, window = configuration()
+        project = Path(os.environ.get("C5_PROJECT", str(Path(__file__).resolve().parents[1])))
+        launcher = project / "c5/receive.sh"
+        if not launcher.is_file():
+            raise ValueError("C5 receiver is not installed")
+    except (OSError, ValueError):
+        write_state(interface, "error", "C5 receiver configuration is missing or invalid")
+        return 1
+    environment = os.environ.copy()
+    # A board already plugged in at boot can start before the user's desktop
+    # creates /run/user/UID. The relay can safely use its private /tmp fallback;
+    # the D-Bus address remains available for notifications after login.
+    if environment.get("XDG_RUNTIME_DIR") and not Path(environment["XDG_RUNTIME_DIR"]).is_dir():
+        environment.pop("XDG_RUNTIME_DIR")
+    environment["C5_STATUS_FILE"] = str(STATE_DIR / f"{interface}.json")
+    environment["C5_STATUS_INTERFACE"] = interface
+    cancelled = False
+    child = None
+
+    def cancel(signum, frame):
+        nonlocal cancelled
+        cancelled = True
+        write_state(interface, "stopping", "Stopping the C5 AirDrop receiver")
+        if child is not None and child.poll() is None:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, cancel)
+    returncode = 1
+    try:
+        child = subprocess.Popen(["bash", str(launcher), "-p", f"/dev/{interface}", "-c", channel,
+                                  "-r", country, "-s", str(window)], env=environment, start_new_session=True)
+        if cancelled:
+            cancel(signal.SIGTERM, None)
+        returncode = child.wait()
+    except OSError:
+        pass
+    finally:
+        if child is not None and child.poll() is None:
+            cancel(signal.SIGTERM, None)
+            try:
+                child.wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+        state, detail = final_state(interface, returncode, cancelled)
+        write_state(interface, state, detail)
+    return 0 if cancelled or returncode == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
